@@ -30,6 +30,10 @@ browser_data/
 /test_*.py
 /debug_*.py
 
+# Master-branch specific test files (not in open-source)
+tests/test_login_auto.py
+tests/test_login_stability.py
+
 # Log files
 log/
 *.log
