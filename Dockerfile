@@ -17,16 +17,16 @@ RUN echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bullseye main contrib
     rm -rf /var/lib/apt/lists/*
 
 # 安装 uv (Python 包管理器)
-RUN pip install uv -i https://mirrors.aliyun.com/pypi/simple/
-
-# 复制依赖文件
-COPY pyproject.toml uv.lock ./
-
-# 安装项目依赖
-RUN uv sync --frozen
+RUN pip install uv -i https://pypi.tuna.tsinghua.edu.cn/simple/
 
 # 复制项目代码
 COPY . .
+
+# 重新生成 uv.lock 文件
+RUN rm -rf uv.lock && uv lock
+
+# 安装项目依赖
+RUN uv sync --frozen
 
 # 创建数据目录
 RUN mkdir -p data log
