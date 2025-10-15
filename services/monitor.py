@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import aiohttp
 
 from .bilibili_auth import BilibiliAuth
+from .comment_fetcher import CommentFetcher
 
 
 @dataclass
@@ -27,6 +28,13 @@ class Creator:
     uid: int
     name: str
     check_interval: int = 300  # 默认5分钟
+    enable_comments: bool = False  # 是否启用评论获取
+    comment_rules: List[Dict[str, Any]] = None  # 评论筛选规则列表（支持多规则）
+
+    def __post_init__(self):
+        """初始化默认值"""
+        if self.comment_rules is None:
+            self.comment_rules = []
 
 
 class JsonState:
@@ -91,6 +99,36 @@ class MonitorService:
 
         # 初始化B站认证管理
         self.bili_auth = BilibiliAuth()
+
+        # 初始化评论获取服务
+        self.comment_fetcher = None
+        self._init_comment_fetcher()
+
+    def _init_comment_fetcher(self) -> None:
+        """初始化评论获取服务"""
+        try:
+            from bilibili_api import Credential
+
+            from config import BILIBILI_CONFIG
+
+            # 创建凭证（bilibili-api-python会自动处理WBI签名！）
+            credential = None
+            if BILIBILI_CONFIG.get("SESSDATA"):
+                credential = Credential(
+                    sessdata=BILIBILI_CONFIG.get("SESSDATA"),
+                    bili_jct=BILIBILI_CONFIG.get("bili_jct"),
+                    buvid3=BILIBILI_CONFIG.get("buvid3"),
+                )
+                self.logger.info("B站凭证创建成功（WBI签名将自动处理）")
+            else:
+                self.logger.warning("未配置SESSDATA，评论获取功能可能受限")
+
+            self.comment_fetcher = CommentFetcher(credential=credential)
+            self.logger.info("评论获取服务初始化成功")
+
+        except Exception as e:
+            self.logger.warning(f"评论获取服务初始化失败: {e}")
+            self.comment_fetcher = None
 
     @staticmethod
     def get_publish_time(item: Dict[str, Any]) -> str:
@@ -504,6 +542,11 @@ class MonitorService:
             f"**{title}**\n\n[原视频链接]({video_url})\n[动态链接]({dynamic_url})"
         )
 
+        # 🆕 评论获取功能
+        comment_content = await self._fetch_video_comments(bvid, title, creator)
+        if comment_content:
+            markdown_content += f"\n\n{comment_content}"
+
         # AI总结
         summary_text = None
         try:
@@ -534,6 +577,68 @@ class MonitorService:
             await self.feishu_bot.send_card_message(
                 creator.name, "哔哩哔哩", markdown_content
             )
+
+    async def _fetch_video_comments(
+        self, bvid: str, video_title: str, creator: Creator
+    ) -> Optional[str]:
+        """
+        获取视频评论并格式化
+
+        Args:
+            bvid: 视频BV号
+            video_title: 视频标题
+            creator: 创作者配置（包含评论筛选条件）
+
+        Returns:
+            格式化后的评论内容，如果没有符合条件的评论则返回None
+        """
+        # 检查是否启用评论获取
+        if not creator.enable_comments:
+            return None
+
+        # 检查评论获取服务是否可用
+        if not self.comment_fetcher:
+            self.logger.warning("评论获取服务未初始化，跳过评论获取")
+            return None
+
+        try:
+            self.logger.info(f"开始获取视频 {bvid} 的评论（博主: {creator.name}）")
+
+            # 检查是否有配置规则
+            if not creator.comment_rules:
+                self.logger.info(f"未配置评论规则，跳过（博主: {creator.name}）")
+                return None
+
+            # 使用多规则获取评论
+            comments = await self.comment_fetcher.fetch_hot_comments_with_rules(
+                bvid=bvid,
+                rules=creator.comment_rules,
+                max_count=10,  # 最多获取10条评论（多规则可能产生更多结果）
+            )
+
+            if not comments:
+                self.logger.info(f"未找到符合条件的评论（博主: {creator.name}）")
+                return None
+
+            # 构建视频链接
+            video_url = f"https://www.bilibili.com/video/{bvid}/"
+
+            # 格式化评论（包含视频链接）
+            comment_section = "---\n\n### 🔥 精选评论\n\n"
+            comment_section += f"**视频**: {video_title}\n\n"
+            comment_section += f"🔗 [点击查看原视频]({video_url})\n\n"
+            comment_section += "---\n\n"
+
+            for idx, comm in enumerate(comments, 1):
+                comment_text = self.comment_fetcher.format_comment_for_display(comm)
+                comment_section += f"**评论 {idx}:**\n\n{comment_text}\n\n"
+
+            self.logger.info(f"成功获取 {len(comments)} 条符合条件的评论")
+            return comment_section
+
+        except Exception as e:
+            self.logger.error(f"获取视频评论失败: {e}", exc_info=True)
+            return None
 
     async def _process_text_dynamic(
         self, item: Dict[str, Any], creator: Creator, url: str
@@ -671,6 +776,8 @@ class MonitorService:
                     uid=int(i["uid"]),
                     name=str(i["name"]),
                     check_interval=int(i.get("check_interval", 300)),
+                    enable_comments=bool(i.get("enable_comments", False)),
+                    comment_rules=i.get("comment_rules", []),
                 )
                 creators.append(creator)
             return creators
@@ -680,6 +787,8 @@ class MonitorService:
                     uid=i["uid"],
                     name=i["name"],
                     check_interval=i.get("check_interval", 300),
+                    enable_comments=False,
+                    comment_rules=[],
                 )
                 for i in default
             ]
